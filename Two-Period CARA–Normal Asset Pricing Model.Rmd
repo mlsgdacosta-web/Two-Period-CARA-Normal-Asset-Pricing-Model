@@ -1,0 +1,203 @@
+---
+title: "Two-Period CARA–Normal Asset Pricing Model"
+author: "Maria Luiza Sena Gomes da Costa"
+date: "2025-12-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+```
+
+## Model 
+
+The model implies a threshold strategy: disclose iff \(s \ge s^*\).  
+The equilibrium threshold solves:
+
+\[
+E[v \mid s^*] - c(s^*) \;=\; E[v \mid s < s^*]
+\]
+
+where \(v \sim N(\mu,\sigma^2)\), \(s = v + \varepsilon\), \(\varepsilon \sim N(0,\eta^2)\), and \(c(s)=k/\eta^2\).
+
+```{r functions}
+# ---- Model Setup ----
+# Timeline:
+#   t=0: Nature draws firm value v
+#   t=1: Manager observes signal s with certainty
+#   t=2: Manager chooses disclosure decision d ∈ {0,1}
+#   t=3: Market makers set price P
+#   t=4: True value v is realized
+#
+# Distributions:
+#   v ~ N(mu, sigma^2)
+#   s = v + ε,  ε ~ N(0, eta^2)
+#
+# Manager utility:
+#   U(P, d) = P - c(s)*d
+# Disclosure cost:
+#   c(s) = k / eta^2   (constant in s for this specification)
+#
+# Market pricing/beliefs in a threshold equilibrium:
+#   Manager discloses iff s ≥ s*.
+#   If disclose:    P = E[v | s] - c(s)
+#   If withhold:    P = E[v | s < s*]
+#
+# Equilibrium threshold condition (manager indifferent at s*):
+#   E[v | s*] - c(s*) = E[v | s < s*]
+#
+# In the normal-normal setting:
+#   E[v | s] = (eta^2*mu + sigma^2*s) / (eta^2 + sigma^2)
+#   E[v | s < s*] = mu - (sigma^2 / sqrt(sigma^2 + eta^2)) * φ(z*) / Φ(z*)
+#       where z* = (s* - mu) / sqrt(sigma^2 + eta^2)
+#
+# -------------------------------------------
+
+# ---- Functions implementing the model formulas ----
+
+# Posterior mean of v given the (perfectly observed by manager) signal s
+E_v_given_s <- function(s, mu, sigma2, eta2) {
+  (eta2 * mu + sigma2 * s) / (eta2 + sigma2)
+}
+
+# Market's expectation of v when the firm withholds (i.e., s is below the cutoff s_star)
+# This is the mean of v conditional on the event {s < s_star} in a jointly normal system.
+E_v_given_withhold <- function(s_star, mu, sigma2, eta2) {
+  sd_s <- sqrt(sigma2 + eta2)                 # sd of the signal s
+  z <- (s_star - mu) / sd_s                   # standardized cutoff
+
+  # ratio phi(z)/Phi(z) can blow up when Phi(z) is ~ 0, so we guard it.
+  Phi <- pnorm(z)
+  Phi <- pmax(Phi, 1e-12)
+
+  mu - (sigma2 / sd_s) * dnorm(z) / Phi
+}
+
+# Disclosure cost: constant in s in this specification
+c_of_s <- function(k, eta2) {
+  k / eta2
+}
+
+# The equilibrium condition written as a zero of a single function:
+# f(s_star) = [E[v|s_star] - c] - E[v|s < s_star]
+threshold_equation <- function(s_star, mu, sigma2, eta2, k) {
+  E_v_given_s(s_star, mu, sigma2, eta2) - c_of_s(k, eta2) - 
+    E_v_given_withhold(s_star, mu, sigma2, eta2)
+}
+
+# Solve for s* via root-finding
+find_s_star <- function(mu, sigma2, eta2, k) {
+  sd_s <- sqrt(sigma2 + eta2)
+
+  # Use a wide bracket around mu in signal space
+  lower <- mu - 12 * sd_s
+  upper <- mu + 12 * sd_s
+
+  f_lower <- threshold_equation(lower, mu, sigma2, eta2, k)
+  f_upper <- threshold_equation(upper, mu, sigma2, eta2, k)
+
+  # If the initial bracket doesn't contain a root, expand it.
+  expand <- 0L
+  while (f_lower * f_upper > 0 && expand < 6) {
+    expand <- expand + 1L
+    lower <- lower - 8 * sd_s
+    upper <- upper + 8 * sd_s
+    f_lower <- threshold_equation(lower, mu, sigma2, eta2, k)
+    f_upper <- threshold_equation(upper, mu, sigma2, eta2, k)
+  }
+
+  if (f_lower * f_upper > 0) {
+    stop("Could not bracket a root for s*. Try different parameters or a wider search interval.")
+  }
+
+  uniroot(
+    f = threshold_equation,
+    interval = c(lower, upper),
+    mu = mu, sigma2 = sigma2, eta2 = eta2, k = k,
+    tol = 1e-10
+  )$root
+}
+```
+
+## Find \(s^*\) for a given parameter set
+
+```{r baseline}
+# ---- Baseline parameters (edit as needed) ----
+mu    <- 0
+sigma2 <- 1
+eta2   <- 0.5
+k      <- 0.5
+
+s_star <- find_s_star(mu = mu, sigma2 = sigma2, eta2 = eta2, k = k)
+s_star
+```
+
+To check, the equilibrium condition should be (numerically) close to zero at the solution:
+
+```{r check}
+threshold_equation(s_star, mu = mu, sigma2 = sigma2, eta2 = eta2, k = k)
+```
+
+## Comparative statics - how \(s^*\) varies with parameters
+
+### 1) Vary disclosure cost \(k\)
+
+```{r vary_k}
+k_grid <- seq(0.01, 1.0, length.out = 60)
+
+k_results <- tibble(
+  k = k_grid,
+  s_star = map_dbl(k, ~find_s_star(mu = mu, sigma2 = sigma2, eta2 = eta2, k = .x))
+)
+
+ggplot(k_results, aes(x = k, y = s_star)) +
+  geom_line() +
+  labs(
+    title = "How the disclosure threshold s* varies with cost k",
+    x = "Disclosure cost parameter k",
+    y = "Equilibrium threshold s*"
+  )
+```
+
+### 2) Vary prior uncertainty \(\sigma^2\)
+
+```{r vary_sigma2}
+sigma2_grid <- seq(0.1, 5.0, length.out = 60)
+
+sigma2_results <- tibble(
+  sigma2 = sigma2_grid,
+  s_star = map_dbl(sigma2, ~find_s_star(mu = mu, sigma2 = .x, eta2 = eta2, k = k))
+)
+
+ggplot(sigma2_results, aes(x = sigma2, y = s_star)) +
+  geom_line() +
+  labs(
+    title = "How the disclosure threshold s* varies with prior variance σ²",
+    x = "Prior variance σ²",
+    y = "Equilibrium threshold s*"
+  )
+```
+
+### 3) Vary signal noise \(\eta^2\)
+
+```{r vary_eta2}
+eta2_grid <- seq(0.1, 5.0, length.out = 60)
+
+eta2_results <- tibble(
+  eta2 = eta2_grid,
+  s_star = map_dbl(eta2, ~find_s_star(mu = mu, sigma2 = sigma2, eta2 = .x, k = k))
+)
+
+ggplot(eta2_results, aes(x = eta2, y = s_star)) +
+  geom_line() +
+  labs(
+    title = "How the disclosure threshold s* varies with signal noise η²",
+    x = "Signal noise η²",
+    y = "Equilibrium threshold s*"
+  )
+```
+
+Overall, the results show that the disclosure threshold s* responds in a predictable manner to changes in model parameters. Higher disclosure costs and greater uncertainty generally increase the cutoff required for disclosure, indicating that firms become more selective about revealing information as disclosure becomes less attractive or less informative.
